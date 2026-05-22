@@ -97,6 +97,8 @@ def meanGridSampling(
         return grid_coords, grid_features, out_mask
 
 def visualize_mst_open3d(nodes, mst):
+    if isinstance(nodes, torch.Tensor):
+        nodes = nodes.detach().cpu().numpy()
     points = o3d.utility.Vector3dVector(nodes)
     lines = []
     connected = mst.nonzero()
@@ -141,7 +143,9 @@ def min_spanning_tree(node_pred, cond_pts, pred_parent_pos, max_bridge_dist=0.2,
     
     threshold = 2 * max_bridge_dist #0.7
     dist_matrix[dist_matrix > threshold] = 0  # Apply threshold to distance matrix
-    mst = minimum_spanning_tree(dist_matrix).toarray()
+    dist_matrix_np = dist_matrix.detach().cpu().numpy()
+    node_pred_np = node_pred.detach().cpu().numpy()
+    mst = minimum_spanning_tree(dist_matrix_np).toarray()
     
     if debug:
         mst_lineset = visualize_mst_open3d(node_pred, mst).paint_uniform_color([0, 1, 0])
@@ -149,7 +153,7 @@ def min_spanning_tree(node_pred, cond_pts, pred_parent_pos, max_bridge_dist=0.2,
     if connected_components_filt == True:
         # compute edge lenghts
         non_zero_edges = mst.nonzero()
-        edge_lengths = np.sqrt((node_pred[non_zero_edges[0]] - node_pred[non_zero_edges[1]]) ** 2).sum(axis=1)
+        edge_lengths = np.sqrt((node_pred_np[non_zero_edges[0]] - node_pred_np[non_zero_edges[1]]) ** 2).sum(axis=1)
         # set edges longer than the threshold to 0
         outlier_mask = edge_lengths > max_bridge_dist
         outlier_edges = (non_zero_edges[0][outlier_mask], non_zero_edges[1][outlier_mask])
@@ -167,7 +171,7 @@ def min_spanning_tree(node_pred, cond_pts, pred_parent_pos, max_bridge_dist=0.2,
         mst[inlier_mask == False] = 0
         
         # pre_reconnect = visualize_mst_open3d(node_pred, mst)
-        mst = dist_matrix.clone()
+        mst = dist_matrix_np.copy()
         mst[inlier_mask == False] = 0
         mst[:, inlier_mask == False] = 0
         # all nodes connected to removed nodes have to be reconnected to the closest node

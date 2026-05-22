@@ -14,10 +14,8 @@ RUN apt-get update && \
 
 RUN pip3 install torch==1.12.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu116
 
-##############################################
-# You should modify this to match your GPU compute capability
-ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 6.2 7.0 7.2 7.5 8.0 8.6"
-##############################################
+# Tesla T4 uses compute capability 7.5; keeping this narrow makes CUDA extension builds much faster.
+ENV TORCH_CUDA_ARCH_LIST="7.5"
 
 ENV TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 
