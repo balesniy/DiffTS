@@ -87,20 +87,16 @@ class TopologicalDiffusionPoints(LightningModule):
         return denoising_model, cond_encoder
 
     def init_schedulers(self):
-        schedulers = [
-            DPMSolverMultistepScheduler(
-                num_train_timesteps=self.hparams["diff"]["t_steps"],
-                beta_start=self.hparams["diff"]["beta_start"],
-                beta_end=self.hparams["diff"]["beta_end"],
-                beta_schedule="linear",
-                algorithm_type="sde-dpmsolver++",
-                solver_order=2,
-            )
-            for _ in range(self.hparams["train"]["batch_size"])
-        ]
-        for scheduler in schedulers:
-            scheduler.set_timesteps(self.diff_params["s_steps"])
-        return schedulers
+        scheduler = DPMSolverMultistepScheduler(
+            num_train_timesteps=self.hparams["diff"]["t_steps"],
+            beta_start=self.hparams["diff"]["beta_start"],
+            beta_end=self.hparams["diff"]["beta_end"],
+            beta_schedule="linear",
+            algorithm_type="sde-dpmsolver++",
+            solver_order=2,
+        )
+        scheduler.set_timesteps(self.diff_params["s_steps"])
+        return scheduler
 
     def torch_to_mink(self, x_feats, resolution):
         x_feats = ME.utils.batched_coordinates(list(x_feats[:]), dtype=torch.float32, device=self.device)
@@ -143,7 +139,7 @@ class TopologicalDiffusionPoints(LightningModule):
     def _parent_flow_targets(self, nodes: torch.Tensor, parent_ids: torch.Tensor, exists: torch.Tensor) -> torch.Tensor:
         batch, n_nodes, _ = nodes.shape
         batch_idx = torch.arange(batch, device=nodes.device).view(batch, 1).expand(batch, n_nodes)
-        parents = nodes[batch_idx, parent_ids.clamp(min=0, max=n_nodes - 1)]
+        parents = nodes[batch_idx, parent_ids.clamp(min=0, max=max(0, n_nodes - 1))]
         flow = normalize_vecs((parents - nodes).reshape(-1, 3)).view_as(nodes)
         flow = torch.where(exists.unsqueeze(-1), flow, torch.zeros_like(flow))
         return flow
@@ -151,21 +147,17 @@ class TopologicalDiffusionPoints(LightningModule):
     def _depth_targets(self, parent_ids: torch.Tensor, exists: torch.Tensor) -> torch.Tensor:
         batch, n_nodes = parent_ids.shape
         depth = torch.zeros((batch, n_nodes), dtype=torch.float32, device=parent_ids.device)
-        for b in range(batch):
-            for node in range(n_nodes):
-                if not bool(exists[b, node]):
-                    continue
-                cur = node
-                seen = set()
-                steps = 0
-                while cur not in seen:
-                    seen.add(cur)
-                    parent = int(parent_ids[b, cur].item())
-                    if parent == cur or parent < 0:
-                        break
-                    steps += 1
-                    cur = parent
-                depth[b, node] = steps
+        if n_nodes == 0:
+            return depth
+        cur_nodes = torch.arange(n_nodes, device=parent_ids.device).expand(batch, n_nodes)
+        parent_ids_clamped = parent_ids.clamp(min=0, max=n_nodes - 1).long()
+        for _ in range(n_nodes):
+            parents = parent_ids_clamped.gather(1, cur_nodes)
+            mask = (parents != cur_nodes) & (parent_ids.gather(1, cur_nodes) >= 0) & exists
+            if not mask.any():
+                break
+            depth += mask.float()
+            cur_nodes = torch.where(mask, parents, cur_nodes)
         max_depth = depth.amax(dim=1, keepdim=True).clamp_min(1.0)
         return depth / max_depth
 
@@ -218,7 +210,7 @@ class TopologicalDiffusionPoints(LightningModule):
         length = (nodes[batch_idx, child] - nodes[batch_idx, parent]).norm(dim=-1, keepdim=True)
         rel_length = length / length.mean().clamp_min(1e-6)
         out_degree = torch.bincount(parent, minlength=nodes.shape[1]).float().to(nodes.device)
-        parent_out_degree = out_degree[parent].unsqueeze(-1) / max(1, int(edge_mask.sum().item()))
+        parent_out_degree = out_degree[parent].unsqueeze(-1) / edge_mask.sum().clamp_min(1).float()
         edge_logit = graph.edge_logits[batch_idx, edge_mask].unsqueeze(-1)
         return torch.cat((features, rel_length, parent_out_degree, edge_logit), dim=-1)
 
@@ -370,9 +362,8 @@ class TopologicalDiffusionPoints(LightningModule):
         )
         guidance_cfg = self._guidance_config()
         out = None
-        for scheduler in self.dpm_scheduler:
-            scheduler.set_timesteps(self.diff_params["s_steps"])
-        timesteps = self.dpm_scheduler[0].timesteps
+        self.dpm_scheduler.set_timesteps(self.diff_params["s_steps"])
+        timesteps = self.dpm_scheduler.timesteps
         total_steps = len(timesteps)
         final_graph = None
         valid_mask = torch.ones((x.shape[0], x.shape[1]), dtype=torch.bool, device=x.device)
@@ -406,7 +397,7 @@ class TopologicalDiffusionPoints(LightningModule):
                 )
                 return edge_term + topo_term
 
-            x0_hat = x0_hat + guidance_displacement(
+            guided_x0_hat = x0_hat + guidance_displacement(
                 x0_hat,
                 energy_fn,
                 step_idx,
@@ -414,7 +405,10 @@ class TopologicalDiffusionPoints(LightningModule):
                 guidance_cfg,
                 valid_mask=valid_mask,
             )
-            x = x0_hat
+            sqrt_alpha = self.diff_params["sqrt_alphas_cumprod"].to(self.device)[t][:, None, None]
+            sqrt_one_minus = self.diff_params["sqrt_one_minus_alphas_cumprod"].to(self.device)[t][:, None, None]
+            guided_eps = (x - sqrt_alpha * guided_x0_hat) / sqrt_one_minus.clamp_min(1e-6)
+            x = self.dpm_scheduler.step(guided_eps, int(timestep), x).prev_sample
             flow = out.flow_pred
         assert out is not None
         final_graph = build_sparse_graph(

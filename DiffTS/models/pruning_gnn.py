@@ -68,21 +68,20 @@ def pruning_labels_from_gt(
     if pred_edges.numel() == 0:
         return torch.empty((0,), dtype=torch.bool, device=pred_nodes.device)
     nearest_gt = torch.cdist(pred_nodes, gt_nodes).argmin(dim=-1)
-    labels = []
+    
+    parent_idx = pred_edges[0]
+    child_idx = pred_edges[1]
+    
+    gt_parent = nearest_gt[parent_idx]
+    gt_child = nearest_gt[child_idx]
+    
     gt_parent_ids = gt_parent_ids.long().clamp(min=0, max=max(gt_nodes.shape[0] - 1, 0))
-    max_steps = max_intermediate + 2
-    for parent, child in pred_edges.t().tolist():
-        gt_parent = int(nearest_gt[parent].item())
-        gt_child = int(nearest_gt[child].item())
-        cur = gt_child
-        keep = False
-        for _ in range(max_steps):
-            if cur == gt_parent:
-                keep = True
-                break
-            next_cur = int(gt_parent_ids[cur].item())
-            if next_cur == cur:
-                break
-            cur = next_cur
-        labels.append(keep)
-    return torch.tensor(labels, dtype=torch.bool, device=pred_nodes.device)
+    
+    keep = (gt_child == gt_parent)
+    cur = gt_child
+    
+    for _ in range(max_intermediate + 2):
+        cur = gt_parent_ids[cur]
+        keep = keep | (cur == gt_parent)
+        
+    return keep
