@@ -1,9 +1,18 @@
 import torch
 import numpy as np
 from DiffTS.utils.scheduling import beta_func
-import open3d as o3d
 
-def compute_diffusion_params(params):
+try:
+    import open3d as o3d
+except ImportError:
+    o3d = None
+
+def compute_diffusion_params(params, device=None):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(device)
+
     # alphas and betas
     if params['diff']['beta_func'] == 'cosine':
         betas = beta_func[params['diff']['beta_func']](params['diff']['t_steps'])
@@ -16,17 +25,10 @@ def compute_diffusion_params(params):
 
     t_steps = params['diff']['t_steps']
     s_steps = params['diff']['s_steps']
+    betas = betas.to(device=device, dtype=torch.float32) if torch.is_tensor(betas) else torch.tensor(betas, dtype=torch.float32, device=device)
     alphas = 1. - betas
-    alphas_cumprod = torch.tensor(
-        np.cumprod(alphas, axis=0), dtype=torch.float32, device=torch.device('cuda')
-    )
-
-    alphas_cumprod_prev = torch.tensor(
-        np.append(1., alphas_cumprod[:-1].cpu().numpy()), dtype=torch.float32, device=torch.device('cuda')
-    )
-
-    betas = torch.tensor(betas, device=torch.device('cuda'))
-    alphas = torch.tensor(alphas, device=torch.device('cuda'))
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    alphas_cumprod_prev = torch.cat((torch.ones(1, dtype=torch.float32, device=device), alphas_cumprod[:-1]))
 
     sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
     sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
@@ -71,6 +73,8 @@ def normalize_vecs(vecs):
     return vecs
 
 def o3d_fps_sampling(points, num_samples):
+    if o3d is None:
+        raise ImportError("open3d is required for o3d_fps_sampling")
     o3d_pcd = o3d.geometry.PointCloud()
     o3d_pcd.points = o3d.utility.Vector3dVector(points.detach().cpu().numpy())
     o3d_pcd = o3d_pcd.farthest_point_down_sample(num_samples)

@@ -30,6 +30,7 @@ diff:
   s_steps: 200
   t_steps: 1000
 model:
+  type: legacy
   out_dim: 96
   downscale_params: 1
   semantic_encoder: false
@@ -38,6 +39,53 @@ model:
   unet_encoder: false
   legacy_model: false
   multiscale_cond: false
+
+topological:
+  n_max: 3000
+  latent_dim: 96
+  semantic_channels: 3
+  temporal_anchor: null
+
+voxel:
+  grid_size: [128, 128, 256]
+  blur_sigma: 1.0
+  bounds_padding: 0.05
+
+graph:
+  k: 12
+  corridor_samples: 8
+  sigma: 0.1
+  tau: 0.25
+  depth_margin: 0.05
+  conf_threshold: 0.5
+  use_two_cycle_loss: false
+
+guidance:
+  active_fraction: 0.2
+  final_decay_fraction: 0.05
+  max_displacement: 0.02
+  base_eta: 1.0
+  repel_weight: 0.0
+  repel_radius: 0.005
+  repel_k: 8
+
+losses:
+  eps: 1.0
+  flow: 1.0
+  conf: 1.0
+  depth: 0.2
+  edge: 1.0
+  topology: 0.1
+  pruning: 0.25
+
+pruning:
+  enabled: true
+  hidden_dim: 128
+  num_layers: 3
+  threshold: 0.5
+  max_intermediate: 3
+  focal_alpha: 0.25
+  focal_gamma: 2.0
 
 train:
   batch_size: 4

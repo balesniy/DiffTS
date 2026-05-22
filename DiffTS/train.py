@@ -1,4 +1,5 @@
 import os
+import inspect
 import subprocess
 from collections.abc import MutableMapping
 from os import environ, makedirs
@@ -16,6 +17,52 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
 import DiffTS.datasets.datasets as datasets
 import DiffTS.models.models as models
+
+
+def select_model_class(cfg):
+    model_type = cfg.get('model', {}).get('type', 'legacy')
+    if model_type == 'legacy':
+        return models.DiffusionPoints
+    if model_type == 'topological':
+        return models.TopologicalDiffusionPoints
+    raise click.ClickException(f"Unknown model.type: {model_type}")
+
+
+def trainer_supports_legacy_gpus_arg():
+    return 'gpus' in inspect.signature(Trainer.__init__).parameters
+
+
+def make_trainer(cfg, model, tb_logger, checkpoint, callbacks):
+    common_kwargs = {
+        'logger': tb_logger,
+        'log_every_n_steps': 100,
+        'max_epochs': cfg['train']['max_epoch'],
+        'callbacks': callbacks,
+        'num_sanity_val_steps': 1 if cfg['data']['test_w_uncond'] else 0,
+    }
+    if torch.cuda.device_count() > 1:
+        cfg['train']['n_gpus'] = torch.cuda.device_count()
+        model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
+        common_kwargs['strategy'] = "ddp"
+
+    if trainer_supports_legacy_gpus_arg():
+        trainer = Trainer(
+            gpus=cfg['train']['n_gpus'],
+            resume_from_checkpoint=checkpoint,
+            **common_kwargs,
+        )
+        return trainer, model, {}
+
+    n_gpus = cfg['train']['n_gpus']
+    accelerator = "gpu" if torch.cuda.is_available() and n_gpus != 0 else "cpu"
+    devices = "auto" if n_gpus == -1 else n_gpus
+    trainer = Trainer(
+        accelerator=accelerator,
+        devices=devices,
+        **common_kwargs,
+    )
+    ckpt_kwargs = {'ckpt_path': checkpoint} if checkpoint else {}
+    return trainer, model, ckpt_kwargs
 
 
 def set_deterministic():
@@ -127,10 +174,11 @@ def main(config, weights, checkpoint, logdir, test, params):
         cfg['data']['data_dir'] = environ.get('TRAIN_DATABASE')
 
     #Load data and model
+    model_cls = select_model_class(cfg)
     if weights is None:
-        model = models.DiffusionPoints(cfg)
+        model = model_cls(cfg)
     else:
-        model = models.DiffusionPoints.load_from_checkpoint(weights, hparams=cfg)
+        model = model_cls.load_from_checkpoint(weights, hparams=cfg)
         print("Used params: ", model.hparams)
         
     data = datasets.dataloaders[cfg['data']['dataloader']](cfg)
@@ -149,36 +197,20 @@ def main(config, weights, checkpoint, logdir, test, params):
     with open(f'{tb_logger.log_dir}/project.diff', 'w+') as diff_file:
         repo_diff = subprocess.run(['git', 'diff'], stdout=subprocess.PIPE)
         diff_file.write(repo_diff.stdout.decode('utf-8'))
-    #Setup trainer
-    if torch.cuda.device_count() > 1:
-        cfg['train']['n_gpus'] = torch.cuda.device_count()
-        model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
-        trainer = Trainer(gpus=cfg['train']['n_gpus'],
-                          logger=tb_logger,
-                          log_every_n_steps=100,
-                          resume_from_checkpoint=checkpoint,
-                          max_epochs= cfg['train']['max_epoch'],
-                          callbacks=[lr_monitor, checkpoint_saver],
-                          strategy="ddp",
-                          num_sanity_val_steps=1 if cfg['data']['test_w_uncond'] else 0,
-                          )
-    else:
-        trainer = Trainer(gpus=cfg['train']['n_gpus'],
-                          logger=tb_logger,
-                          log_every_n_steps=100,
-                          resume_from_checkpoint=checkpoint,
-                          max_epochs= cfg['train']['max_epoch'],
-                          callbacks=[lr_monitor, checkpoint_saver],
-                          num_sanity_val_steps=1 if cfg['data']['test_w_uncond'] else 0,
-                        #   profiler="advanced"
-                          )
+    trainer, model, ckpt_kwargs = make_trainer(
+        cfg,
+        model,
+        tb_logger,
+        checkpoint,
+        callbacks=[lr_monitor, checkpoint_saver],
+    )
     # Train!
     if test:
         print('TESTING MODE')
-        trainer.test(model, data)
+        trainer.test(model, data, **ckpt_kwargs)
     else:
         print('TRAINING MODE')
-        trainer.fit(model, data)
+        trainer.fit(model, data, **ckpt_kwargs)
 
 if __name__ == "__main__":
     main(auto_envvar_prefix='PLS')

@@ -457,3 +457,6 @@ class DiffusionPoints(LightningModule):
             return [optimizer], [scheduler]
         else:
             return optimizer
+
+
+from DiffTS.models.topological_diffusion import TopologicalDiffusionPoints  # noqa: E402
